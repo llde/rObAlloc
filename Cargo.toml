@@ -1,0 +1,13 @@
+[package]
+name = "rObAlloc"
+version = "0.1.0"
+authors = ["Lorenzo <lorenzofersteam@live.it>"]
+
+[lib]
+name = "rObAlloc"
+crate-type = ["dylib"] # could be `staticlib` as wellversion = "0.1.0"
+
+[dependencies]
+libc = "*"
+kernel32-sys = "*"
+winapi = "*"
