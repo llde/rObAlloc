@@ -1,101 +1,110 @@
+#[macro_use]
+extern crate lazy_static;
+
 extern crate libc;
 extern crate kernel32;
 extern crate winapi;
 
 use std::sync::RwLock;
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-    }
-}
-
 
 static doVerify : bool = true;
 static ZeroInitialized : u32 = 0x00000008;
 static NoSerialization : u32 = 0x00000001;
 static NoFlag : u32  = 0x00000000;
+static null_ptr : usize = 0x00000000;
 
-fn GetHeapProcess() -> winapi::HANDLE{
-    let mut handle;
-    unsafe{handle = kernel32::GetProcessHeap();}
-    return handle;
+lazy_static!{
+    static ref heapg : Heap =  Heap::new(768);
 }
 
-fn IsHeapValid(heap : winapi::HANDLE, pointer  : *const std::os::raw::c_void) -> i32{
-    let mut valid;
-    unsafe{valid = kernel32::HeapValidate(heap,NoFlag,pointer);}
-    return valid;
+struct Heap {
+    heap_pointer: winapi::HANDLE,
+    size : RwLock<u32>
 }
 
-fn Allocate(heap : winapi::HANDLE, size : usize) -> *const std::os::raw::c_void{
-    let pointer;
-    unsafe{ pointer = kernel32::HeapAlloc(heap, ZeroInitialized, size as u32);}
-    return pointer;
-}
+unsafe impl Sync for Heap{}
+unsafe impl Send for Heap{}
 
-fn Reallocate(heap : winapi::HANDLE, size : usize , pointe : *mut std::os::raw::c_void) -> *const std::os::raw::c_void{
-    let pointer;
-    unsafe{ pointer = kernel32::HeapReAlloc(heap, ZeroInitialized, pointe ,size as u32);}
-    return pointer;
-}
+impl Heap { 
+    fn new(size : u32) -> Heap{
+        let mut ch;
+        unsafe{ch = kernel32::GetProcessHeap()};
+        Heap{heap_pointer : ch,  size : RwLock::new(size)}
+    }
 
-fn GetSizeHeap(heap : winapi::HANDLE) -> u32{
-    let mut valid;
-    unsafe{valid = kernel32::HeapSize(heap,NoFlag, 0 as *const std::os::raw::c_void);}
-    return valid;
-}
 
-fn FreeHeap(heap : winapi::HANDLE, obj : *mut std::os::raw::c_void) -> (){
-    unsafe{kernel32::HeapFree(heap, NoFlag ,obj);}
-}
+    fn SetHeapSize(&self, size : u32){
+        *self.size.write().unwrap() = size
+    }
 
+    fn GetHeapProcess(&self) -> winapi::HANDLE{
+        return self.heap_pointer;
+    }
+
+    fn IsHeapValid(&self, pointer  : *const std::os::raw::c_void) -> i32{
+        let mut valid;
+        unsafe{valid = kernel32::HeapValidate(self.heap_pointer ,NoFlag,pointer);}
+        return valid; 
+    }
+
+    fn Allocate(&self, size : usize) -> *const std::os::raw::c_void{
+        let pointer;
+        unsafe{ pointer = kernel32::HeapAlloc(self.heap_pointer, ZeroInitialized, size as u32);}
+        return pointer;
+    }
+
+    fn Reallocate(&self,size : usize , pointe : *mut std::os::raw::c_void) -> *const std::os::raw::c_void{
+        let pointer;
+        unsafe{ pointer = kernel32::HeapReAlloc(self.heap_pointer, ZeroInitialized, pointe ,size as u32);}
+        return pointer;
+    }
+
+    fn GetHeapSize(&self) -> u32{
+        let mut valid;
+        unsafe{valid = kernel32::HeapSize(self.heap_pointer, NoFlag, 0 as *const std::os::raw::c_void);}
+        return valid;
+    }
+
+    fn FreeHeap(&self, obj : *mut std::os::raw::c_void) -> (){
+        unsafe{kernel32::HeapFree(self.heap_pointer, NoFlag ,obj);}
+    }
+}
 
 #[no_mangle]
-pub extern "C"  fn obAlloc(sizeT : usize) -> *const std::os::raw::c_void{
-    let size;
-    if sizeT < 1 {
-        size = 1;
+pub extern "C"  fn obAlloc(size : usize) -> *const std::os::raw::c_void{
+    if size == 0 {
+        return 0x00000000 as *const std::os::raw::c_void; //Let the program handle. If we got at this  maybe its better to just crash
     }
-    else {size = sizeT;}
-    let heap = GetHeapProcess();
-    Allocate(heap,size)
+    heapg.Allocate(size)
 }
 
 
 #[no_mangle]
 pub extern "C" fn obFree(allocObj : *mut std::os::raw::c_void) -> (){
     if(allocObj as usize == 0){return;}
-    let  heap = GetHeapProcess();
-    let  valid = IsHeapValid(heap,allocObj);
-    if(valid != 0) {FreeHeap(heap, allocObj);}
+    let  valid = heapg.IsHeapValid(allocObj);
+    if(valid != 0) {heapg.FreeHeap(allocObj);}
 }
 
 
 
 #[no_mangle]
 pub extern "C" fn obSize() -> usize {
-    let mut heap = GetHeapProcess();
-    GetSizeHeap(heap) as usize
+    heapg.GetHeapSize() as usize
 }
 
 
-
-
 #[no_mangle]
-pub extern "C"  fn obRealloc(point : *mut std::os::raw::c_void, sizeT : usize) -> *const std::os::raw::c_void{
-    let size;
-    if sizeT < 1 {
-        size = 1;
+pub extern "C"  fn obRealloc(point : *mut std::os::raw::c_void, size : usize) -> *const std::os::raw::c_void{
+    if size == 0 {
+        return 0x00000000 as *const std::os::raw::c_void;
     }
-    else {size = sizeT;}
-    let mut heap = GetHeapProcess();
-    let realloc = IsHeapValid(heap, point);
+    let realloc = heapg.IsHeapValid(point);
     if(realloc != 0){
-        Reallocate(heap,size, point)
+        heapg.Reallocate(size, point)
     }
     else{
-        Allocate(heap,size)
+        heapg.Allocate(size)
     }
 }
 
@@ -103,10 +112,14 @@ pub extern "C"  fn obRealloc(point : *mut std::os::raw::c_void, sizeT : usize) -
 
 #[no_mangle]
 pub extern "C" fn obIsInHeap(validate : *const std::os::raw::c_void) -> bool{
-    let mut heap = GetHeapProcess();
-    let valid = IsHeapValid(heap,validate); 
+    let valid = heapg.IsHeapValid(validate); 
     if(valid == 0) {return false;}
     else  {return true;}
 }
 
-    
+#[no_mangle]
+pub extern "C" fn obInit(size: u32, log: *const std::os::raw::c_char) -> bool{
+    heapg.SetHeapSize(size);
+    return true;
+}
+
